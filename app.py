@@ -14,14 +14,24 @@ else:
 
 genai.configure(api_key=GENAI_API_KEY)
 
-# --- 2. AIモデル自動選択 ---
+# --- 2. 使えるAIモデルを自動で選ぶ関数 ---
 def get_working_model():
     try:
         available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        for name in ["models/gemini-2.0-flash", "models/gemini-1.5-flash"]:
-            if name in available_models: return name
+        
+        # 安定版の 1.5-flash を最優先にするように順番を入れ替えました
+        target_models = [
+            "models/gemini-1.5-flash", 
+            "models/gemini-1.5-pro",
+            "models/gemini-2.0-flash-exp"
+        ]
+        
+        for name in target_models:
+            if name in available_models:
+                return name
         return available_models[0] if available_models else None
-    except: return None
+    except:
+        return None
 
 # --- 3. AI分析関数 ---
 def analyze_pdf(pdf_bytes, model_name):
