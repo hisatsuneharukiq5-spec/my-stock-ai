@@ -1,4 +1,6 @@
 streamlit
 google-generativeai
 PyMuPDF
-requests
+yfinance
+pandas
+plotly
