@@ -1,112 +1,122 @@
 import streamlit as st
 import google.generativeai as genai
-import requests
-import datetime
+import yfinance as yf
+import pandas as pd
+import plotly.graph_objects as go
 import fitz  # PyMuPDF
-import time
-import urllib.parse
 
 # --- 1. 初期設定 ---
 if "GEMINI_API_KEY" in st.secrets:
-    GENAI_API_KEY = st.secrets["GEMINI_API_KEY"]
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 else:
-    GENAI_API_KEY = "YOUR_LOCAL_API_KEY"
+    st.error("APIキーをSecretsに設定してください。")
 
-genai.configure(api_key=GENAI_API_KEY)
+# 安定版モデルを指定
+MODEL_NAME = "gemini-1.5-flash"
 
-# --- 2. 使えるAIモデルを自動で選ぶ関数 ---
-def get_working_model():
-    try:
-        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        
-        # 429エラーを避けるため、無料枠が安定している 1.5-flash を一番上に持ってきました
-        target_models = [
-            "models/gemini-1.5-flash", 
-            "models/gemini-1.5-pro",
-            "models/gemini-2.0-flash-exp" # 2.0は最後に試す
-        ]
-        
-        for name in target_models:
-            if name in available_models:
-                return name
-        return available_models[0] if available_models else None
-    except:
-        return None
+# --- 2. データ取得関数 ---
+def get_stock_data(ticker_code):
+    """株価・指標・ニュースを取得"""
+    ticker_symbol = f"{ticker_code}.T"  # 日本株用に.Tを付与
+    stock = yf.Ticker(ticker_symbol)
+    
+    # 基本情報
+    info = stock.info
+    # 株価履歴（直近6ヶ月）
+    hist = stock.history(period="6mo")
+    # ニュース
+    news = stock.news
+    
+    return info, hist, news
 
 # --- 3. AI分析関数 ---
-def analyze_pdf(pdf_bytes, model_name):
-    try:
-        with st.spinner("AIが資料を読み込んで分析中..."):
-            text = ""
-            with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
-                for page in doc: text += page.get_text()
-            
-            if not text.strip():
-                st.error("PDFから文字を抽出できません。画像形式のPDFの可能性があります。")
-                return
-
-            model = genai.GenerativeModel(model_name)
-            prompt = f"プロの証券アナリストとして、以下の決算短信から『業績のポイント』と『将来性』を3点ずつ、非常に分かりやすく要約して下さい。\n\n{text[:30000]}"
-            response = model.generate_content(prompt)
-            
-            st.success("✅ 分析が完了しました！")
-            st.markdown(response.text)
-    except Exception as e:
-        st.error(f"分析エラー: {str(e)}")
-
-# --- 4. EDINET検索関数（ブロック通知付き） ---
-def get_kessan_pdf(ticker_code):
-    raw_code = str(ticker_code).strip()
-    target_code = raw_code + "0" if len(raw_code) == 4 else raw_code
-    HEADERS = {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"}
+def analyze_with_ai(info, news, pdf_text=None):
+    """数字とニュースをまとめてAIが判断"""
+    model = genai.GenerativeModel(MODEL_NAME)
     
-    for i in range(14): # 直近2週間に絞って素早く検索
-        date = (datetime.date.today() - datetime.timedelta(days=i)).strftime("%Y-%m-%d")
-        url = f"https://disclosure.edinet-fsa.go.jp/api/v1/documents.json?date={date}&type=2"
-        try:
-            res = requests.get(url, headers=HEADERS, timeout=10)
-            if res.status_code == 200:
-                data = res.json()
-                for doc in data.get("results", []):
-                    if target_code in str(doc.get("secCode", "")) and "決算短信" in str(doc.get("docDescription", "")):
-                        pdf_url = f"https://disclosure.edinet-fsa.go.jp/api/v1/documents/{doc["docID"]}"
-                        pdf_res = requests.get(pdf_url, params={"type": 2}, headers=HEADERS)
-                        return pdf_res.content, doc["docDescription"]
-            elif res.status_code == 403: return "BLOCKED", None
-        except: continue
-    return None, None
+    prompt = f"""
+    あなたは凄腕の証券アナリストです。以下の情報を元に、この企業を分析してください。
+    
+    【基本データ】
+    企業名: {info.get('longName', '不明')}
+    現在株価: {info.get('currentPrice', '不明')}円
+    PER: {info.get('trailingPE', '不明')}倍 / PBR: {info.get('priceToBook', '不明')}倍
+    配当利回り: {info.get('dividendYield', 0) * 100:.2f}%
+    
+    【最新ニュース】
+    {str([n.get('title') for n in news[:5]])}
+    
+    【追加資料(PDF内容)】
+    {pdf_text[:5000] if pdf_text else "なし"}
+    
+    上記を踏まえ：
+    1. この企業の「現在の通信簿（5段階評価）」とその理由
+    2. ニュースから読み取れる「世間の期待度や懸念点」
+    3. 今後の投資戦略（買い時か、様子見か）
+    を、投資初心者にもわかりやすく解説してください。
+    """
+    response = model.generate_content(prompt)
+    return response.text
 
-# --- 5. メイン画面 ---
-st.set_page_config(page_title="AI株アナライザー", layout="wide")
-st.title("📈 AI決算アナライザー")
+# --- 4. メイン画面 (UI) ---
+st.set_page_config(page_title="AI株・掲示板アナライザー", layout="wide")
 
-working_model = get_working_model()
+st.title("📈 AI株価・世論アナライザー")
+st.caption("銘柄コードを入れるだけで、数字・ニュース・AI分析を一括表示します")
 
-# サイドバーに説明
-with st.sidebar:
-    st.info("💡 **使い分けのコツ**\n\nお役所(EDINET)のサーバーは制限が厳しいため、自動検索がエラーになることが多いです。その場合は「PDFをアップロード」をご利用ください。")
+# 銘柄入力
+ticker_input = st.text_input("証券コードを入力 (例: 7203)", max_chars=4)
 
-tab1, tab2 = st.tabs(["🔍 コードで検索 (実験中)", "📤 PDFを直接分析 (推奨)"])
+if ticker_input:
+    try:
+        with st.spinner("データを取得中..."):
+            info, hist, news = get_stock_data(ticker_input)
+            
+        # --- レイアウト: 上段 (数字とチャート) ---
+        col1, col2 = st.columns([1, 2])
+        
+        with col1:
+            st.metric("現在株価", f"{info.get('currentPrice', '---')} 円")
+            st.write(f"**PER:** {info.get('trailingPE', '---')} 倍")
+            st.write(f"**PBR:** {info.get('priceToBook', '---')} 倍")
+            st.write(f"**利回り:** {info.get('dividendYield', 0) * 100:.2f} %")
+            st.write(f"**時価総額:** {info.get('marketCap', 0) // 10**8:,} 億円")
+            
+        with col2:
+            # 株価チャート (Plotlyでプロっぽく)
+            fig = go.Figure(data=[go.Scatter(x=hist.index, y=hist['Close'], mode='lines', name='株価')])
+            fig.update_layout(title="直近6ヶ月の株価推移", margin=dict(l=0, r=0, t=30, b=0), height=300)
+            st.plotly_chart(fig, use_container_width=True)
 
-with tab1:
-    ticker = st.text_input("証券コード (4桁)", placeholder="例: 7203", key="ticker_input")
-    if st.button("最新決算を自動検索"):
-        pdf_data, title = get_kessan_pdf(ticker)
-        if pdf_data == "BLOCKED":
-            st.error("現在EDINET側でブロックされています。下のボタンからPDFをダウンロードして、右のタブで読み込ませてください。")
-            # Google検索リンクを生成
-            search_query = urllib.parse.quote(f"{ticker} 決算短信 PDF")
-            st.markdown(f'[![GoogleでPDFを探す](https://img.shields.io/badge/Google検索-%E2%86%92-blue?style=for-the-badge)](https://www.google.com/search?q={search_query})')
-        elif pdf_data:
-            st.info(f"発見: {title}")
-            analyze_pdf(pdf_data, working_model)
+        # --- 中段: 世間の声 (簡易掲示板風) ---
+        st.subheader("📢 市場の声・関連ニュース")
+        if news:
+            for n in news[:3]:
+                with st.expander(f"📰 {n['title']}"):
+                    st.write(f"ソース: {n['publisher']}")
+                    st.write(f"[記事を読む]({n['link']})")
         else:
-            st.warning("直近の決算が見つかりませんでした。")
+            st.write("現在、目立ったニュースはありません。")
 
-with tab2:
-    st.subheader("PDFをアップロードして分析")
-    st.write("iPad/スマホでダウンロードしたPDFを選択してください。")
-    uploaded_file = st.file_uploader("決算短信のPDF", type="pdf")
-    if uploaded_file and working_model:
-        analyze_pdf(uploaded_file.read(), working_model)
+        # --- 下段: AIの総評 ---
+        st.subheader("🤖 AIによる総合診断")
+        if st.button("AI分析を実行"):
+            analysis = analyze_with_ai(info, news)
+            st.success("分析が完了しました")
+            st.markdown(analysis)
 
+    except Exception as e:
+        st.error(f"データの取得に失敗しました。正しいコードか確認してください。 (Error: {e})")
+
+# --- おまけ: PDF深掘り機能 ---
+st.divider()
+with st.expander("📄 もっと詳しく！決算PDFをアップロードして分析"):
+    uploaded_file = st.file_uploader("決算短信などのPDFを選択", type="pdf")
+    if uploaded_file and ticker_input:
+        if st.button("PDFも含めて再分析"):
+            text = ""
+            with fitz.open(stream=uploaded_file.read(), filetype="pdf") as doc:
+                for page in doc: text += page.get_text()
+            info, _, news = get_stock_data(ticker_input)
+            result = analyze_with_ai(info, news, text)
+            st.markdown(result)
