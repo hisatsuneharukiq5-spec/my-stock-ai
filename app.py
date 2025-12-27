@@ -19,11 +19,11 @@ def get_working_model():
     try:
         available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         
-        # 安定版の 1.5-flash を最優先にするように順番を入れ替えました
+        # 429エラーを避けるため、無料枠が安定している 1.5-flash を一番上に持ってきました
         target_models = [
             "models/gemini-1.5-flash", 
             "models/gemini-1.5-pro",
-            "models/gemini-2.0-flash-exp"
+            "models/gemini-2.0-flash-exp" # 2.0は最後に試す
         ]
         
         for name in target_models:
@@ -109,3 +109,4 @@ with tab2:
     uploaded_file = st.file_uploader("決算短信のPDF", type="pdf")
     if uploaded_file and working_model:
         analyze_pdf(uploaded_file.read(), working_model)
+
