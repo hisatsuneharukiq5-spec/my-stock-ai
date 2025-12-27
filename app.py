@@ -11,6 +11,7 @@ if "GEMINI_API_KEY" in st.secrets:
 else:
     st.error("APIキーをSecretsに設定してください。")
 
+# 安定して動く1.5モデルを使用
 MODEL_NAME = "gemini-1.5-flash"
 
 # --- 2. データ取得関数 ---
@@ -20,10 +21,19 @@ def get_stock_data(ticker_code):
     
     info = stock.info
     hist = stock.history(period="6mo")
-    # ニュース取得のエラー対策
+    
+    # ニュース取得（エラーが出ないように安全に取得）
     try:
-        news = stock.news
-        if not news: news = []
+        raw_news = stock.news
+        news = []
+        if raw_news:
+            for n in raw_news:
+                # 'title' がない場合でもエラーにならないように .get() を使う
+                news.append({
+                    "title": n.get("title", "ニュースタイトルなし"),
+                    "link": n.get("link", "#"),
+                    "publisher": n.get("publisher", "不明なソース")
+                })
     except:
         news = []
     
@@ -33,32 +43,29 @@ def get_stock_data(ticker_code):
 def analyze_with_ai(info, news, pdf_text=None):
     model = genai.GenerativeModel(MODEL_NAME)
     
-    # ニュースタイトルの抽出（エラー回避版）
-    news_titles = [n.get('title', '無題のニュース') for n in news[:5]]
+    news_summary = "\n".join([f"・{n['title']}" for n in news[:5]])
     
     prompt = f"""
-    あなたはプロの投資アドバイザーです。以下の情報を分析してください。
+    あなたはプロの投資アドバイザー兼、有名投資掲示板の管理人です。
+    以下の情報を元に、この企業を分析して、投資家たちが今どんな雰囲気（世論）なのか教えてください。
     
-    【企業情報】
-    企業名: {info.get('longName', '不明')}
-    株価: {info.get('currentPrice', '不明')}円
-    PER: {info.get('trailingPE', '不明')} / PBR: {info.get('priceToBook', '不明')}
+    【企業名】: {info.get('longName', '不明')}
+    【指標】: PER {info.get('trailingPE', '---')}倍 / PBR {info.get('priceToBook', '---')}倍
+    【最新ニュース】:
+    {news_summary}
     
-    【市場のニュース・話題】
-    {news_titles}
-    
-    【PDF資料】
+    【PDF追加情報】:
     {pdf_text[:5000] if pdf_text else "なし"}
     
-    上記を元に、以下の3点を「投資家掲示板」で話題になりそうな口調も交えて解説してください。
-    1. 現在の業績は「買い」か？
-    2. ニュースから見える「世間のポジティブな噂・ネガティブな懸念」
-    3. ズバリ、今後の注目ポイント
+    分析項目：
+    1. 現在の業績と株価の評価（「買い」「待ち」など）
+    2. 掲示板で話題になりそうな「世間の噂・期待・不安」
+    3. ズバリ、今後の注目ポイントは？
     """
     response = model.generate_content(prompt)
     return response.text
 
-# --- 4. メイン画面 ---
+# --- 4. メイン画面 (UI) ---
 st.set_page_config(page_title="AI株・掲示板アナライザー", layout="wide")
 st.title("📈 AI株価・世論アナライザー")
 
@@ -69,50 +76,47 @@ if ticker_input:
         with st.spinner("データを取得中..."):
             info, hist, news = get_stock_data(ticker_input)
             
+        # 上段：数字とチャート
         col1, col2 = st.columns([1, 2])
         with col1:
             st.metric("現在株価", f"{info.get('currentPrice', '---')} 円")
             st.write(f"**PER:** {info.get('trailingPE', '---')} 倍")
             st.write(f"**PBR:** {info.get('priceToBook', '---')} 倍")
             st.write(f"**利回り:** {info.get('dividendYield', 0) * 100:.2f} %")
+            st.write(f"**時価総額:** {info.get('marketCap', 0) // 10**8:,} 億円")
             
         with col2:
             fig = go.Figure(data=[go.Scatter(x=hist.index, y=hist['Close'], mode='lines', name='株価')])
-            fig.update_layout(title="直近6ヶ月の株価推移", height=300, margin=dict(l=0,r=0,t=30,b=0))
+            fig.update_layout(title="直近6ヶ月の株価推移", height=300, margin=dict(l=0, r=0, t=30, b=0))
             st.plotly_chart(fig, use_container_width=True)
 
-        # --- 修正ポイント: ニュース・掲示板セクション ---
-        st.subheader("📢 市場の声 (最新ニュース)")
+        # 中段：市場の声（ニュース）
+        st.subheader("📢 市場の声・関連ニュース")
         if news:
             for n in news[:3]:
-                # .get('title') を使うことでエラーを回避
-                title = n.get('title', '詳細情報なし')
-                publisher = n.get('publisher', '不明なソース')
-                link = n.get('link', '#')
-                with st.expander(f"📌 {title}"):
-                    st.write(f"ソース: {publisher}")
-                    st.write(f"[記事をチェックする]({link})")
+                with st.expander(f"📰 {n['title']}"):
+                    st.write(f"ソース: {n['publisher']}")
+                    st.write(f"[記事を読む]({n['link']})")
         else:
-            st.warning("現在、取得できる新しいニュースはありません。")
+            st.write("現在、目立ったニュースはありません。")
 
+        # 下段：AI分析ボタン
         st.divider()
-
-        # --- AIの総評 ---
         if st.button("🤖 AI掲示板・総合診断を実行"):
-            with st.spinner("AIが市場の空気を読んでいます..."):
+            with st.spinner("AIが市場の空気を読み取っています..."):
                 analysis = analyze_with_ai(info, news)
-                st.success("分析完了！")
+                st.success("分析が完了しました！")
                 st.markdown(analysis)
 
     except Exception as e:
-        st.error(f"エラーが発生しました: {e}")
+        st.error(f"データの表示中にエラーが発生しました。時間を置いてから再度お試しください。")
 
-# PDFアップロード機能（下部に配置）
+# PDFアップロード機能（サイドバー）
 with st.sidebar:
-    st.header("📄 決算PDF分析")
-    uploaded_file = st.file_uploader("PDFを追加して深掘り", type="pdf")
+    st.header("📄 PDF深掘り分析")
+    uploaded_file = st.file_uploader("決算PDFをアップロード", type="pdf")
     if uploaded_file and ticker_input:
-        if st.button("PDF込みで分析"):
+        if st.button("PDFも含めて分析"):
             text = ""
             with fitz.open(stream=uploaded_file.read(), filetype="pdf") as doc:
                 for page in doc: text += page.get_text()
